@@ -1,0 +1,11 @@
+# 데이터 및 로그 디렉터리
+zookeeper-data/
+zookeeper-datalog/
+kafka-logs/
+connect-logs/
+control-center-data/
+control-center-logs/
+ksqldb-data/
+ksqldb-logs/
+rest-proxy-logs/
+

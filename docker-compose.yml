@@ -1,0 +1,285 @@
+---
+version: '2'
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.1.2
+    hostname: zookeeper
+    healthcheck:  # 정상 구동 확인
+      test: ["CMD", "nc", "-zv", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+        #start_period: 60s # 컨테이너 시작 후 20초 대기
+    container_name: zookeeper
+    user: "${UID}:${GID}"  # 현재 사용자로 실행
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181   # ZooKeeper 클라이언트 포트
+      ZOOKEEPER_TICK_TIME: 2000   # ZooKeeper 클라이언트와 서버 간 세션 상태 확인 주기(ms)
+    volumes: # 볼륨 마운트 설정 추가
+      - ./zookeeper-data:/var/lib/zookeeper/data # /var/lib/zookeeper/data: ZooKeeper의 스냅샷 데이터 저장 디렉터리
+        # 스냅샷 데이터는 ZooKeeper의 메모리 상태를 주기적으로 디스크에 저장한 데이터 
+      - ./zookeeper-datalog:/var/lib/zookeeper/datalog # /var/lib/zookeeper/datalog: ZooKeeper의 트랜잭션 로그 저장 디렉터리
+        # 트랜잭션 로그는 ZooKeeper에 기록되는 모든 변경 사항을 순차적으로 저장한 로그 
+
+
+  broker:
+    image: confluentinc/cp-server:7.1.2
+    hostname: broker
+    user: "${UID}:${GID}"  # 현재 사용자로 실행
+    container_name: broker
+    healthcheck:
+      #test: ["CMD", "docker", "exec", "broker", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 20s
+      timeout: 10s
+      retries: 3 
+    depends_on: # 의존성 설정
+      zookeeper:
+        condition: service_healthy # zookeeper 서비스가 준비될 때까지 대기
+          #entrypoint: ["/bin/sh", "-c", "until echo stat | nc zookeeper 2181 | grep -q Mode; do echo Waiting for Zookeeper...; sleep 2; done; /etc/confluent/docker/run"]
+    ports:
+      - "9092:9092" # Kafka 리스너
+      - "9101:9101" # JMX
+    environment:
+      KAFKA_ZOOKEEPER_CONNECTION_TIMEOUT_MS: 20000  # 20초로 증가
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST  # 리스너 보안 프로토콜
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker:29092,PLAINTEXT_HOST://${EXTERNAL_IP}:9092  # 외부에서 도커 컨테이너 내부 접속 정보 및 다른 브로커가 접속하기 위해 필요한 정보 advertised.listeners=프로토콜://호스트:포트
+      KAFKA_METRIC_REPORTERS: io.confluent.metrics.reporter.ConfluentMetricsReporter  # 카프카 브로커, 프로듀서, 컨슈머 등의 컴포넌트에서 발생 메트릭 수집 및 외부로 전송 역할
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1 # 오프셋 토픽 복제 팩터
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0 # 그룹 초기 리밸런스 지연 시간 설정
+      KAFKA_CONFLUENT_LICENSE_TOPIC_REPLICATION_FACTOR: 1 # Confluent 라이선스 토픽 복제 팩터
+      KAFKA_CONFLUENT_BALANCER_TOPIC_REPLICATION_FACTOR: 1  # Confluent 밸런서 토픽 복제 팩터
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1  # 트랜잭션 상태 로그 최소 ISR(In-Sync Replicas) 팔로워 파티션 집합, 프로듀서가 acks=all로 메시지를 보낼 때, 쓰기 작업을 성공적으로 완료하기 위해 최소한으로 유지되어야 하는 ISR의 수
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1 # 트랜잭션 상태 로그 복제 팩터
+      KAFKA_JMX_PORT: 9101
+      KAFKA_JMX_HOSTNAME: localhost
+      KAFKA_CONFLUENT_SCHEMA_REGISTRY_URL: http://schema-registry:8081  # Schema Registry URL
+      CONFLUENT_METRICS_REPORTER_BOOTSTRAP_SERVERS: broker:29092  # 메트릭 리포터 부트스트랩 서버
+      CONFLUENT_METRICS_REPORTER_TOPIC_REPLICAS: 1  # 메트릭 리포터 토픽 복제본 설정
+      CONFLUENT_METRICS_ENABLE: 'true'  # Confluent 메트릭 활성화
+      CONFLUENT_SUPPORT_CUSTOMER_ID: 'anonymous'  # 컨슈머 ID
+      KAFKA_MESSAGE_MAX_BYTES: 2147483647 # 1GB
+      KAFKA_REPLICA_FETCH_MAX_BYTES: 2147483647 # 1GB
+      KAFKA_SOCKET_REQUEST_MAX_BYTES: 2147483647 # 1GB
+    volumes:
+      #- ./kafka-logs:/var/lib/kafka/data  # /var/lib/kafka/data: Kafka Broker의 로그 데이터 저장 디렉터리
+        # 로그 데이터는 Kafka 토픽의 메시지 데이터
+      - ./kafka-config:/etc/kafka # /etc/kafka: Kafka Broker의 설정 파일 저장 디렉터리
+        # server.properties 등의 설정 파일을 저장
+
+
+  schema-registry:  # 메시지 스키마 관리 도구 (직렬화/역직렬화)
+    image: confluentinc/cp-schema-registry:7.1.2
+    hostname: schema-registry
+    user: "${UID}:${GID}"  # 현재 사용자로 실행
+    container_name: schema-registry
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/subjects"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s # 컨테이너 시작 후 20초 대기
+    depends_on:
+      broker:
+        condition: service_healthy # broker 서비스가 준비될 때까지 대기
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: 'broker:29092' # 스키마 정보를 카프카 토픽에 저장하기 위함
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+    volumes:
+      - ./schema-registry-config:/etc/schema-registry # /etc/schema-registry: Schema Registry의 설정 파일 저장 디렉터리
+        # schema-registry.properties 등의 설정 파일을 저장
+
+  connect:  # 카프카 커넥트
+    image: cnfldemos/cp-server-connect-datagen:0.5.3-7.1.0
+    hostname: connect
+    container_name: connect
+    healthcheck:
+      test: ["CMD", "curl", "http://localhost:8083/connectors"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 60s # 컨테이너 시작 후 20초 대기
+    depends_on:
+      broker:
+        condition: service_healthy # broker 서비스가 준비될 때까지 대기
+      schema-registry:
+        condition: service_healthy # schema-registry 서비스가 준비될 때까지 대기
+    ports:
+      - "8083:8083"
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: 'broker:29092'
+      CONNECT_REST_ADVERTISED_HOST_NAME: connect  # Connect 연결을 위한 컨테이너명으로 광고
+      CONNECT_GROUP_ID: compose-connect-group
+      CONNECT_CONFIG_STORAGE_TOPIC: docker-connect-configs
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_FLUSH_INTERVAL_MS: 10000 # Connect 오프셋 플러스 간격
+      CONNECT_OFFSET_STORAGE_TOPIC: docker-connect-offsets
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_STATUS_STORAGE_TOPIC: docker-connect-status
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_KEY_CONVERTER: org.apache.kafka.connect.storage.StringConverter
+      CONNECT_VALUE_CONVERTER: io.confluent.connect.avro.AvroConverter  # 커넥트 값 컨버터 설정 (Avro 형식 사용)
+      CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      # CLASSPATH required due to CC-2422
+      CLASSPATH: /usr/share/java/monitoring-interceptors/monitoring-interceptors-7.1.2.jar # 모니터링 인터셉터 클래스 경로 설정 (Confluent 모니터링)
+      CONNECT_PRODUCER_INTERCEPTOR_CLASSES: "io.confluent.monitoring.clients.interceptor.MonitoringProducerInterceptor" # 커넥트 프로듀서 인터셉터 설정 (Confluent 모니터링)
+      CONNECT_CONSUMER_INTERCEPTOR_CLASSES: "io.confluent.monitoring.clients.interceptor.MonitoringConsumerInterceptor" # 커넥트 컨슈머 인터셉터 설정 (Confluent 모니터링)
+      CONNECT_PLUGIN_PATH: "/usr/share/java,/usr/share/confluent-hub-components"
+      CONNECT_LOG4J_LOGGERS: org.apache.zookeeper=ERROR,org.I0Itec.zkclient=ERROR,org.reflections=ERROR
+    volumes: # 볼륨 마운트 설정 추가
+      - ./connect-config:/etc/kafka-connect # (커넥터 설정 파일 저장)
+      - ./connect-plugins:/usr/share/confluent-hub-components # (커넥터 플러그인 저장)
+      - ./connect-logs:/var/log/kafka-connect # (커넥트 로그 저장)
+
+  control-center:
+    image: confluentinc/cp-enterprise-control-center:7.1.2
+    hostname: control-center
+    user: "${UID}:${GID}"  # 현재 사용자로 실행
+    container_name: control-center
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9021"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s # 컨테이너 시작 후 20초 대기
+    depends_on:
+      broker:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+      connect:
+        condition: service_healthy
+      ksqldb-server:
+        condition: service_healthy
+    ports:
+      - "9021:9021"
+    environment:
+      CONTROL_CENTER_BOOTSTRAP_SERVERS: 'broker:29092'
+      CONTROL_CENTER_CONNECT_CONNECT-DEFAULT_CLUSTER: 'connect:8083'  # Control Center에서 관리할 커넥트 클러스터
+      CONTROL_CENTER_KSQL_KSQLDB1_URL: "http://ksqldb-server:8088"  # Control Center에서 관리할 ksqlDB 클러스터
+      CONTROL_CENTER_KSQL_KSQLDB1_ADVERTISED_URL: "http://ksqldb-server:8088" #Control Center에서 사용할 ksqlDB URL
+      CONTROL_CENTER_SCHEMA_REGISTRY_URL: "http://schema-registry:8081"
+      CONTROL_CENTER_REPLICATION_FACTOR: 1
+      CONTROL_CENTER_INTERNAL_TOPICS_PARTITIONS: 1
+      CONTROL_CENTER_MONITORING_INTERCEPTOR_TOPIC_PARTITIONS: 1
+      CONFLUENT_METRICS_TOPIC_REPLICATION: 1
+      PORT: 9021  # Control Center 웹 UI 포트 설정
+    volumes: # 볼륨 마운트 설정 추가
+      - ./control-center-config:/etc/control-center # (Control Center 설정 파일 저장)
+      - ./control-center-data:/var/lib/control-center # (Control Center 데이터 저장)
+      - ./control-center-logs:/var/log/control-center # (Control Center 로그 저장)
+
+  ksqldb-server:
+    image: confluentinc/cp-ksqldb-server:7.1.2
+    user: "${UID}:${GID}"  # 현재 사용자로 실행
+    hostname: ksqldb-server
+    container_name: ksqldb-server
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8088/info"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s # 컨테이너 시작 후 20초 대기
+    depends_on:
+      broker:
+        condition: service_healthy
+      connect:
+        condition: service_healthy
+    ports:
+      - "8088:8088"
+    environment:
+      KSQL_CONFIG_DIR: "/etc/ksql"
+      KSQL_BOOTSTRAP_SERVERS: "broker:29092"
+      KSQL_HOST_NAME: ksqldb-server
+      KSQL_LISTENERS: "http://0.0.0.0:8088"
+      KSQL_CACHE_MAX_BYTES_BUFFERING: 0
+      KSQL_KSQL_SCHEMA_REGISTRY_URL: "http://schema-registry:8081"
+      KSQL_PRODUCER_INTERCEPTOR_CLASSES: "io.confluent.monitoring.clients.interceptor.MonitoringProducerInterceptor"
+      KSQL_CONSUMER_INTERCEPTOR_CLASSES: "io.confluent.monitoring.clients.interceptor.MonitoringConsumerInterceptor"
+      KSQL_KSQL_CONNECT_URL: "http://connect:8083"
+      KSQL_KSQL_LOGGING_PROCESSING_TOPIC_REPLICATION_FACTOR: 1
+      KSQL_KSQL_LOGGING_PROCESSING_TOPIC_AUTO_CREATE: 'true'
+      KSQL_KSQL_LOGGING_PROCESSING_STREAM_AUTO_CREATE: 'true'
+    volumes: # 볼륨 마운트 설정 추가
+    - ./ksqldb-config:/etc/ksql # (ksqlDB 설정 파일 저장)
+    - ./ksqldb-data:/var/lib/ksql-server/data # (ksqlDB 데이터 저장)
+    - ./ksqldb-logs:/var/log/ksql-server # (ksqlDB 로그 저장)
+
+
+  ksqldb-cli:
+    image: confluentinc/cp-ksqldb-cli:7.1.2
+    user: "${UID}:${GID}"  # 현재 사용자로 실행
+    container_name: ksqldb-cli
+    depends_on:
+      broker:
+        condition: service_healthy
+      connect:
+        condition: service_healthy
+      ksqldb-server:
+        condition: service_healthy
+    entrypoint: /bin/sh
+    tty: true
+
+  ksql-datagen:
+    image: confluentinc/ksqldb-examples:7.1.2
+    hostname: ksql-datagen
+    user: "${UID}:${GID}"  # 현재 사용자로 실행
+    container_name: ksql-datagen
+    depends_on:
+      broker:
+        condition: service_healthy
+      connect:
+        condition: service_healthy
+      ksqldb-server:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+    #ksqlDB Server, Kafka Broker, Schema Registry가 준비된 후에 데이터 생성을 시작해야 오류 방지
+    command: "bash -c 'echo Waiting for Kafka to be ready... && \
+                       cub kafka-ready -b broker:29092 1 40 && \
+                       echo Waiting for Confluent Schema Registry to be ready... && \
+                       cub sr-ready schema-registry 8081 40 && \
+                       echo Waiting a few seconds for topic creation to finish... && \
+                       sleep 11 && \
+                       tail -f /dev/null'"
+    environment:
+      KSQL_CONFIG_DIR: "/etc/ksql"
+      STREAMS_BOOTSTRAP_SERVERS: broker:29092
+      # Kafka Streams API를 사용하여 Schema Registry에 접근
+      STREAMS_SCHEMA_REGISTRY_HOST: schema-registry
+      STREAMS_SCHEMA_REGISTRY_PORT: 8081
+
+  rest-proxy:
+    image: confluentinc/cp-kafka-rest:7.1.2
+    user: "${UID}:${GID}"  # 현재 사용자로 실행
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8082/topics"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s # 컨테이너 시작 후 20초 대기
+    depends_on:
+      broker:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+    ports:
+      - 8082:8082
+    hostname: rest-proxy
+    container_name: rest-proxy
+    environment:
+      KAFKA_REST_HOST_NAME: rest-proxy
+      KAFKA_REST_BOOTSTRAP_SERVERS: 'broker:29092'  # Kafka Broker와 통신하여 데이터를 읽고 쓰기 위해 Kafka 클러스터에 연결
+      KAFKA_REST_LISTENERS: "http://0.0.0.0:8082" # 외부 클라이언트가 REST Proxy API에 접근하기 위한 주소를 설정
+      KAFKA_REST_SCHEMA_REGISTRY_URL: 'http://schema-registry:8081' # REST Proxy는 Schema Registry를 사용하여 메시지의 스키마를 관리하고 직렬화/역직렬화를 수행
+    volumes: # 볼륨 마운트 설정 추가
+    - ./rest-proxy-config:/etc/kafka-rest # (Kafka REST Proxy 설정 파일 저장)
+    - ./rest-proxy-logs:/var/log/kafka-rest # (Kafka REST Proxy 로그 저장)
+
